@@ -1,0 +1,720 @@
+<!doctype html>
+<html lang="en-AU">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lane Siege</title>
+<style>
+  :root {
+    --night: #16181D;
+    --wall: #7FA6DE;
+    --cream: #F4EFE6;
+    --muted: #A9ADB8;
+    --panel: #252933;
+    --cap: #343946;
+    --blue: #4FA8FF;
+    --orange: #FFB02E;
+    --good: #7BD88F;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--night); color: var(--cream);
+    font: 16px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 10px; padding-block: 12px; overflow-x: hidden; overflow-y: auto;
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px));
+  }
+  #stage { position: relative; line-height: 0; }
+  canvas { display: block; }
+  #c { border-radius: 8px; }
+  #banner {
+    position: absolute; left: 50%; top: 12px; transform: translateX(-50%);
+    background: rgba(22, 24, 29, .92); border: 2px solid var(--wall); border-radius: 10px;
+    padding: 8px 16px; font-size: 18px; line-height: 1.3; font-weight: 600;
+    white-space: nowrap; opacity: 0; transition: opacity .25s; pointer-events: none;
+  }
+  #banner.on { opacity: 1; }
+  #overlay {
+    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    background: rgba(22, 24, 29, .88); border-radius: 8px; line-height: 1.4; padding: 16px; text-align: center;
+  }
+  #overlay.hide { display: none; }
+  #overlay h1 { font-size: 44px; line-height: 1.1; margin: 0 0 6px; color: var(--wall); }
+  #overlay h2 { font-size: 36px; line-height: 1.15; margin: 0 0 8px; }
+  #overlay p { margin: 6px auto; max-width: 620px; }
+  .hint { color: var(--muted); font-size: 14px; }
+  button {
+    font: inherit; font-weight: 700; color: var(--cream); background: var(--panel);
+    border: 2px solid var(--wall); border-radius: 10px; padding: 10px 18px; cursor: pointer;
+  }
+  #decks { display: flex; gap: 16px; justify-content: center; flex-wrap: wrap; }
+  .deck { background: var(--panel); border-radius: 10px; padding: 8px; display: grid; gap: 6px; border: 2px solid transparent; }
+  .deck.p0 { border-color: var(--blue); }
+  .deck.p1 { border-color: var(--orange); }
+  .deck-top { display: flex; align-items: baseline; gap: 10px; font-size: 14px; }
+  .deck-top b { font-size: 15px; }
+  .deck-top .num { font-weight: 800; font-variant-numeric: tabular-nums; font-size: 16px; }
+  .deck-top .rate { color: var(--good); margin-left: auto; font-variant-numeric: tabular-nums; }
+  .ebar { height: 10px; border-radius: 5px; background: var(--cap); overflow: hidden; }
+  .ebar span { display: block; height: 100%; width: 0; }
+  .p0 .ebar span { background: var(--blue); }
+  .p1 .ebar span { background: var(--orange); }
+  .cards { display: grid; grid-template-columns: repeat(5, 74px) 96px; gap: 6px; }
+  .card {
+    background: var(--cap); border-radius: 8px; padding: 4px 4px 6px; text-align: center;
+    line-height: 1.15; transition: opacity .15s, transform .1s;
+  }
+  .card.poor { opacity: .4; }
+  .card.go { transform: translateY(-3px); }
+  .card canvas { margin: 0 auto; }
+  .card .k { display: inline-block; min-width: 20px; padding: 1px 5px; border-radius: 4px; background: var(--cream); color: var(--night); font-weight: 800; font-size: 13px; }
+  .card .n { font-size: 12px; font-weight: 700; margin-top: 3px; }
+  .card .c { font-size: 12px; color: var(--muted); }
+  .card.up { border: 2px dashed var(--good); display: grid; align-content: start; gap: 3px; }
+  .card.up .plus { color: var(--good); font-size: 12px; font-weight: 700; }
+  .pips { display: flex; gap: 3px; justify-content: center; margin-top: 2px; }
+  .pips i { width: 12px; height: 6px; border-radius: 3px; background: #4A5060; }
+  .pips i.on { background: var(--good); }
+</style>
+</head>
+<body>
+  <div id="stage">
+    <canvas id="c"></canvas>
+    <div id="banner"></div>
+    <div id="overlay"></div>
+  </div>
+  <div id="decks"></div>
+
+<script>
+// ---------- The numbers you can change ----------
+// cost: energy to send one. hp: health. dmg: damage per hit. rate: seconds between hits.
+// range: how far it reaches. speed: how fast it walks. r: how much room it takes up.
+const UNITS = [
+  { name: 'Meat Shield', cost: 20, hp: 260,  dmg: 8,   rate: 1.0, range: 22,  speed: 40, r: 14 },
+  { name: 'Tank',        cost: 50, hp: 1000, dmg: 12,  rate: 1.2, range: 24,  speed: 22, r: 18 },
+  { name: 'Fighter',     cost: 30, hp: 150,  dmg: 32,  rate: 0.8, range: 22,  speed: 55, r: 12 },
+  { name: 'Archer',      cost: 40, hp: 100,  dmg: 24,  rate: 1.1, range: 150, speed: 45, r: 12 },
+  { name: 'Brute',       cost: 80, hp: 800,  dmg: 110, rate: 1.6, range: 26,  speed: 28, r: 20, splash: 45 },
+];
+// Bought in order, one at a time. Each one adds energy every second, for the rest of the game.
+const UPGRADES = [
+  { name: 'Water Wheel', cost: 60,  plus: 4 },
+  { name: 'Windmill',    cost: 150, plus: 6 },
+  { name: 'Mine',        cost: 300, plus: 10 },
+  { name: 'Crystal',     cost: 550, plus: 14 },
+  { name: 'Power Core',  cost: 900, plus: 20 },
+];
+const TOWER  = { hp: 1400, dmg: 30, rate: 0.9, range: 170, r: 23 };
+const CASTLE = { hp: 3000, dmg: 40, rate: 1.0, range: 210, r: 45 };
+const MAX_ENERGY = 1000;
+const START_ENERGY = 50;
+const BASE_INCOME = 8;            // energy every second before any upgrades
+const RUSH_AFTER = 120;           // seconds, then energy comes twice as fast
+
+const W = 1000, H = 400;
+const GROUND = 285;               // where the soldiers' feet are
+const SIDES = [
+  { name: 'Blue', color: '#4FA8FF', dark: '#2B5F94', castleX: 62, towerX: 230, spawnX: 120,
+    keys: ['Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5'], upKey: 'KeyQ',
+    keyText: ['1', '2', '3', '4', '5'], upText: 'Q' },
+  { name: 'Orange', color: '#FFB02E', dark: '#9A6514', castleX: 938, towerX: 770, spawnX: 880,
+    keys: ['Digit6', 'Digit7', 'Digit8', 'Digit9', 'Digit0'], upKey: 'KeyP',
+    keyText: ['6', '7', '8', '9', '0'], upText: 'P' },
+];
+
+// ---------- Game state ----------
+let state = 'menu';         // menu, play, over
+let units = [], towers = [], castles = [], shots = [], puffs = [], pops = [];
+let players = [];
+let clock = 0, elapsed = 0, rush = false, nextId = 1, bannerUntil = 0;
+let winner = null;
+
+function newGame() {
+  units = []; shots = []; puffs = []; pops = [];
+  towers = SIDES.map((s, team) => ({
+    kind: 'tower', team, x: s.towerX, hp: TOWER.hp, max: TOWER.hp, r: TOWER.r, cd: 0, alive: true, hurt: -9 }));
+  castles = SIDES.map((s, team) => ({
+    kind: 'castle', team, x: s.castleX, hp: CASTLE.hp, max: CASTLE.hp, r: CASTLE.r, cd: 0, alive: true, hurt: -9 }));
+  players = SIDES.map(() => ({ energy: START_ENERGY, built: 0, flash: [0, 0, 0, 0, 0, 0] }));
+  elapsed = 0; rush = false; winner = null;
+  state = 'play';
+  renderOverlay();
+  showBanner('Go! Knock down the other castle.');
+  beep(660, .15); beep(880, .2, .15);
+}
+
+function dirOf(team) { return team === 0 ? 1 : -1; }
+function incomeOf(team) {
+  let n = BASE_INCOME;
+  for (let i = 0; i < players[team].built; i++) n += UPGRADES[i].plus;
+  return n;
+}
+
+function send(team, type) {
+  const p = players[team], u = UNITS[type];
+  if (state !== 'play' || p.energy < u.cost) { beep(150, .08); return; }
+  p.energy -= u.cost;
+  p.flash[type] = clock + .15;
+  units.push({
+    kind: 'unit', id: nextId++, team, type,
+    x: SIDES[team].spawnX, depth: (nextId * 23) % 37,
+    hp: u.hp, max: u.hp, r: u.r, cd: 0, swing: -9, walk: Math.random() * 6, hurt: -9, alive: true,
+  });
+  beep(300 + type * 90, .08);
+}
+
+function upgrade(team) {
+  const p = players[team], next = UPGRADES[p.built];
+  if (state !== 'play' || !next || p.energy < next.cost) { beep(150, .08); return; }
+  p.energy -= next.cost;
+  p.built++;
+  p.flash[5] = clock + .15;
+  showBanner(`${SIDES[team].name} built a ${next.name}! Plus ${next.plus} energy a second.`);
+  beep(520, .1); beep(780, .15, .1);
+}
+
+// ---------- Fighting ----------
+// Everything a unit could hit: enemy soldiers, the enemy tower, then the enemy castle.
+function enemiesOf(team) {
+  const list = units.filter(e => e.alive && e.team !== team);
+  const t = towers[1 - team];
+  if (t.alive) list.push(t);
+  list.push(castles[1 - team]);
+  return list;
+}
+
+function hit(target, dmg) {
+  if (!target.alive) return;
+  target.hp -= dmg;
+  target.hurt = clock;
+  pops.push({ x: target.x + (Math.random() * 10 - 5), y: topOf(target), text: String(dmg), age: 0 });
+  if (target.hp > 0) return;
+  target.hp = 0;
+  target.alive = false;
+  puffs.push({ x: target.x, y: target.kind === 'unit' ? GROUND + target.depth - 20 : GROUND - 60, age: 0, size: target.r * (target.kind === 'unit' ? 1.4 : 2.2) });
+  if (target.kind === 'tower') { showBanner(`${SIDES[target.team].name} lost their tower!`); beep(180, .3); }
+  if (target.kind === 'castle') endGame(1 - target.team);
+}
+
+function updateUnit(u, dt) {
+  const spec = UNITS[u.type], dir = dirOf(u.team);
+  u.cd -= dt;
+  let target = null, best = Infinity;
+  for (const e of enemiesOf(u.team)) {
+    const ahead = (e.x - u.x) * dir;
+    const gap = ahead - e.r - u.r;
+    if (ahead > -(e.r + u.r) && gap < best) { best = gap; target = e; }
+  }
+  if (target && best <= spec.range) {
+    if (u.cd <= 0) {
+      u.cd = spec.rate;
+      u.swing = clock;
+      if (spec.splash) {
+        for (const e of enemiesOf(u.team)) {
+          if (e !== target && e.kind === 'unit' && Math.abs(e.x - target.x) <= spec.splash) hit(e, spec.dmg);
+        }
+        beep(120, .12);
+      }
+      if (spec.range > 60) {
+        shots.push({ kind: 'arrow', x1: u.x + dir * 10, y1: GROUND + u.depth - 26, x2: target.x, y2: topOf(target) + 10, age: 0, dur: .35 });
+      }
+      hit(target, spec.dmg);
+    }
+  } else {
+    const room = target ? best - spec.range : Infinity;
+    const step = Math.min(spec.speed * dt, Math.max(0, room));
+    u.x += dir * step;
+    u.walk += step * .18;
+  }
+}
+
+function updateGuard(g, spec, dt) {
+  if (!g.alive) return;
+  g.cd -= dt;
+  if (g.cd > 0) return;
+  let target = null, best = spec.range;
+  for (const u of units) {
+    if (!u.alive || u.team === g.team) continue;
+    const d = Math.abs(u.x - g.x);
+    if (d <= best) { best = d; target = u; }
+  }
+  if (!target) return;
+  g.cd = spec.rate;
+  const fromY = g.kind === 'castle' ? GROUND - 175 : GROUND - 105;
+  shots.push({ kind: 'bolt', team: g.team, x1: g.x, y1: fromY, x2: target.x, y2: GROUND + target.depth - 20, age: 0, dur: .22 });
+  hit(target, spec.dmg);
+}
+
+function update(dt) {
+  clock += dt;
+  if (bannerUntil && clock > bannerUntil) { bannerUntil = 0; document.getElementById('banner').classList.remove('on'); }
+  for (const list of [shots, puffs, pops]) for (const s of list) s.age += dt;
+  shots = shots.filter(s => s.age < s.dur);
+  puffs = puffs.filter(p => p.age < .5);
+  pops = pops.filter(p => p.age < .7);
+  if (state !== 'play') return;
+  elapsed += dt;
+  if (!rush && elapsed >= RUSH_AFTER) { rush = true; showBanner('Rush time! Energy comes twice as fast.'); beep(990, .3); }
+  players.forEach((p, team) => { p.energy = Math.min(MAX_ENERGY, p.energy + incomeOf(team) * (rush ? 2 : 1) * dt); });
+  for (const u of units) if (u.alive) updateUnit(u, dt);
+  towers.forEach(t => updateGuard(t, TOWER, dt));
+  castles.forEach(c => updateGuard(c, CASTLE, dt));
+  units = units.filter(u => u.alive);
+}
+
+function endGame(team) {
+  if (state !== 'play') return;
+  state = 'over';
+  winner = team;
+  renderOverlay();
+  beep(523, .15); beep(659, .15, .15); beep(784, .3, .3);
+}
+
+// ---------- Keys ----------
+addEventListener('keydown', e => {
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  wakeSound();
+  if (e.code === 'Space') e.preventDefault();
+  if (e.repeat) return;
+  if (e.code === 'KeyM') { muted = !muted; return; }
+  if ((e.code === 'Space' || e.code === 'Enter') && state !== 'play') { newGame(); return; }
+  if (e.code === 'Escape' && state !== 'menu') { state = 'menu'; units = []; renderOverlay(); return; }
+  if (state !== 'play') return;
+  SIDES.forEach((s, team) => {
+    if (e.code === s.upKey) upgrade(team);
+    const type = s.keys.indexOf(e.code);
+    if (type >= 0) send(team, type);
+  });
+});
+
+// ---------- Sound ----------
+let audio = null, muted = false;
+function wakeSound() {
+  if (!audio) { try { audio = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { audio = null; } }
+}
+function beep(freq, length, delay = 0) {
+  if (!audio || muted) return;
+  const when = audio.currentTime + delay;
+  const osc = audio.createOscillator(), gain = audio.createGain();
+  osc.type = 'triangle';
+  osc.frequency.value = freq;
+  gain.gain.setValueAtTime(.1, when);
+  gain.gain.exponentialRampToValueAtTime(.001, when + length);
+  osc.connect(gain).connect(audio.destination);
+  osc.start(when);
+  osc.stop(when + length);
+}
+
+// ---------- Screen text ----------
+const $ = id => document.getElementById(id);
+function showBanner(text) {
+  $('banner').textContent = text;
+  $('banner').classList.add('on');
+  bannerUntil = clock + 2.5;
+}
+
+function renderOverlay() {
+  const o = $('overlay');
+  if (state === 'play') { o.className = 'hide'; o.innerHTML = ''; return; }
+  o.className = '';
+  if (state === 'over') {
+    const s = SIDES[winner];
+    o.innerHTML = `<div><h2 style="color:${s.color}">${s.name} wins!</h2>
+      <p>${SIDES[1 - winner].name}'s castle is down.</p>
+      <p class="hint">Space for a rematch. Esc for the menu.</p></div>`;
+    return;
+  }
+  o.innerHTML = `<div>
+    <h1>Lane Siege</h1>
+    <p>Two players, one keyboard. Send soldiers down the road and knock down the other castle.
+       Towers and castles shoot back, so put a Meat Shield or a Tank in front to soak up the hits.</p>
+    <p><span style="color:${SIDES[0].color};font-weight:700">Blue</span> sends with 1 to 5 and builds with Q.
+       <span style="color:${SIDES[1].color};font-weight:700">Orange</span> sends with 6 to 0 and builds with P.</p>
+    <p>Energy fills up to 1000. Spend it on soldiers now, or build upgrades that make more energy every second.
+       There are five upgrades, each bigger than the last. After 2 minutes it is Rush time and energy comes twice as fast.</p>
+    <p><button id="go">Start (Space)</button></p>
+    <p class="hint">M turns the sound on or off. You need a keyboard to play. If the keys do nothing, click the game first.</p>
+  </div>`;
+  $('go').onclick = () => { wakeSound(); newGame(); };
+}
+
+// ---------- Cards under the field ----------
+const deckEls = [{}, {}];
+function buildDecks() {
+  $('decks').innerHTML = SIDES.map((s, team) => `<div class="deck p${team}">
+    <div class="deck-top"><b style="color:${s.color}">${s.name}</b>
+      <span class="num" id="num-${team}"></span><span class="rate" id="rate-${team}"></span></div>
+    <div class="ebar"><span id="ebar-${team}"></span></div>
+    <div class="cards">${UNITS.map((u, type) => `<div class="card" id="card-${team}-${type}">
+      <span class="k">${s.keyText[type]}</span>
+      <canvas width="112" height="104" id="icon-${team}-${type}" style="width:56px;height:52px"></canvas>
+      <div class="n">${u.name}</div><div class="c">${u.cost} energy</div></div>`).join('')}
+      <div class="card up" id="card-${team}-5">
+        <span><span class="k">${s.upText}</span></span>
+        <div class="n" id="upname-${team}"></div>
+        <div class="plus" id="upplus-${team}"></div>
+        <div class="c" id="upcost-${team}"></div>
+        <div class="pips" id="pips-${team}">${UPGRADES.map(() => '<i></i>').join('')}</div>
+      </div>
+    </div>
+  </div>`).join('');
+  SIDES.forEach((s, team) => {
+    const d = deckEls[team];
+    d.num = $(`num-${team}`); d.rate = $(`rate-${team}`); d.bar = $(`ebar-${team}`);
+    d.upname = $(`upname-${team}`); d.upplus = $(`upplus-${team}`); d.upcost = $(`upcost-${team}`);
+    d.pips = [...$(`pips-${team}`).children];
+    d.cards = [0, 1, 2, 3, 4, 5].map(i => $(`card-${team}-${i}`));
+    UNITS.forEach((u, type) => {
+      const ic = $(`icon-${team}-${type}`).getContext('2d');
+      ic.scale(2, 2);
+      drawSoldier(ic, type, team, 28, 49, dirOf(team), 0, 0, 40 / heightOf(type));
+    });
+  });
+}
+
+function updateDecks() {
+  SIDES.forEach((s, team) => {
+    const p = players[team], d = deckEls[team];
+    if (!p) return;
+    d.num.textContent = `${Math.floor(p.energy)} / ${MAX_ENERGY}`;
+    d.rate.textContent = `+${incomeOf(team) * (rush ? 2 : 1)} a second`;
+    d.bar.style.width = (p.energy / MAX_ENERGY * 100) + '%';
+    UNITS.forEach((u, type) => {
+      d.cards[type].classList.toggle('poor', p.energy < u.cost);
+      d.cards[type].classList.toggle('go', p.flash[type] > clock);
+    });
+    const next = UPGRADES[p.built];
+    d.upname.textContent = next ? `Build ${next.name}` : 'All built';
+    d.upplus.textContent = next ? `+${next.plus} a second` : '';
+    d.upcost.textContent = next ? `${next.cost} energy` : '';
+    d.cards[5].classList.toggle('poor', !next || p.energy < next.cost);
+    d.cards[5].classList.toggle('go', p.flash[5] > clock);
+    d.pips.forEach((pip, i) => pip.classList.toggle('on', i < p.built));
+  });
+}
+
+// ---------- Drawing ----------
+const canvas = $('c'), ctx = canvas.getContext('2d');
+let scale = 1;
+let backdrop = null;
+function fit() {
+  const decksH = $('decks').offsetHeight || 170;
+  scale = Math.min((innerWidth - 32) / W, (innerHeight - decksH - 40) / H);
+  scale = Math.max(scale, .4);
+  const dpr = devicePixelRatio || 1;
+  canvas.style.width = W * scale + 'px';
+  canvas.style.height = H * scale + 'px';
+  canvas.width = W * scale * dpr;
+  canvas.height = H * scale * dpr;
+  ctx.setTransform(scale * dpr, 0, 0, scale * dpr, 0, 0);
+}
+addEventListener('resize', fit);
+
+function circle(c, x, y, r, fill) { c.fillStyle = fill; c.beginPath(); c.arc(x, y, r, 0, Math.PI * 2); c.fill(); }
+function rrect(c, x, y, w, h, r, fill) { c.fillStyle = fill; c.beginPath(); c.roundRect(x, y, w, h, r); c.fill(); }
+function line(c, x1, y1, x2, y2, width, color) {
+  c.strokeStyle = color; c.lineWidth = width; c.lineCap = 'round';
+  c.beginPath(); c.moveTo(x1, y1); c.lineTo(x2, y2); c.stroke();
+}
+
+// The sky, hills and road never change, so draw them once.
+function buildBackdrop() {
+  backdrop = document.createElement('canvas');
+  backdrop.width = W * 2; backdrop.height = H * 2;
+  const b = backdrop.getContext('2d');
+  b.scale(2, 2);
+  const sky = b.createLinearGradient(0, 0, 0, GROUND);
+  sky.addColorStop(0, '#0E1015'); sky.addColorStop(1, '#232A3A');
+  b.fillStyle = sky; b.fillRect(0, 0, W, H);
+  let seed = 7;
+  const rand = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  for (let i = 0; i < 90; i++) {
+    b.globalAlpha = .3 + rand() * .6;
+    circle(b, rand() * W, rand() * 170, rand() * 1.3 + .3, '#F4EFE6');
+  }
+  b.globalAlpha = 1;
+  circle(b, 840, 60, 18, '#E9E4D6');
+  circle(b, 848, 55, 17, '#1A1F2B');
+  for (const [color, base, amp, f] of [['#1C2230', 215, 40, .006], ['#181D28', 240, 28, .011]]) {
+    b.fillStyle = color; b.beginPath(); b.moveTo(0, H);
+    for (let x = 0; x <= W; x += 10) b.lineTo(x, base - Math.sin(x * f + base) * amp - Math.sin(x * f * 3.1) * amp * .3);
+    b.lineTo(W, H); b.fill();
+  }
+  b.fillStyle = '#22301F'; b.fillRect(0, GROUND - 25, W, H);
+  b.fillStyle = '#3A3428'; b.fillRect(0, GROUND - 12, W, 56);
+  b.fillStyle = '#2C3A26'; b.fillRect(0, GROUND + 44, W, H);
+  for (let i = 0; i < 160; i++) {
+    b.globalAlpha = .5;
+    circle(b, rand() * W, GROUND - 10 + rand() * 52, rand() * 2 + .5, rand() < .5 ? '#4A4234' : '#2E2920');
+  }
+  for (let i = 0; i < 120; i++) {
+    const x = rand() * W, y = rand() < .5 ? GROUND - 18 + rand() * 6 : GROUND + 46 + rand() * 40;
+    b.globalAlpha = .6;
+    line(b, x, y, x + rand() * 3 - 1.5, y - 4 - rand() * 4, 1.2, '#3F5A34');
+  }
+  b.globalAlpha = 1;
+}
+
+const SKIN = '#E8B98A', SKIN_DARK = '#C98F5E', STEEL = '#AEB6C3', STEEL_DARK = '#7C8596', WOOD = '#8B5A2B', WOOD_DARK = '#5E3A1A';
+
+function legs(c, walk, hipY, len, width, color) {
+  const a = Math.sin(walk) * .55;
+  line(c, -2, hipY, -2 + Math.sin(a) * len, hipY + Math.cos(a) * len, width, color);
+  line(c, 2, hipY, 2 - Math.sin(a) * len, hipY + Math.cos(a) * len, width, color);
+}
+
+// Every soldier is drawn facing right with feet at (0, 0), then flipped for Orange.
+// swing goes from 1 down to 0 just after a hit, for the attack moves.
+function drawSoldier(c, type, team, x, y, dir, walk, swing, size = 1) {
+  const s = SIDES[team];
+  const k = [1.15, 1.3, 1, 1, 1.55][type] * size;
+  c.save();
+  c.translate(x, y);
+  c.scale(dir * k, k);
+  c.fillStyle = 'rgba(0,0,0,.35)';
+  c.beginPath(); c.ellipse(0, 0, 12, 3.5, 0, 0, Math.PI * 2); c.fill();
+  const bob = Math.abs(Math.sin(walk)) * -1.2;
+  c.translate(0, bob);
+
+  if (type === 0) {                                   // Meat Shield: round belly, wooden plank shield
+    legs(c, walk, -10, 10, 4, '#4A3B2C');
+    c.fillStyle = s.color; c.beginPath(); c.ellipse(0, -19, 10, 11, 0, 0, Math.PI * 2); c.fill();
+    c.fillStyle = s.dark; c.beginPath(); c.ellipse(-1, -15, 7, 5, 0, 0, Math.PI); c.fill();
+    circle(c, 0, -34, 7, SKIN);
+    c.fillStyle = WOOD; c.beginPath(); c.arc(0, -35, 7.5, Math.PI, 0); c.fill();
+    circle(c, 4, -33, 1.2, '#16181D');
+    circle(c, 4.5, -30, 1.6, '#E79B8A');
+    rrect(c, 8, -38, 8, 34, 2, WOOD);
+    for (const yy of [-30, -20, -12]) line(c, 9, yy, 15, yy, 1, WOOD_DARK);
+    rrect(c, 8, -25, 8, 4, 1, s.color);
+    circle(c, 12, -35, 1.2, STEEL); circle(c, 12, -7, 1.2, STEEL);
+  }
+
+  if (type === 1) {                                   // Tank: full armour, plume, tower shield
+    legs(c, walk, -12, 12, 5, STEEL_DARK);
+    rrect(c, -8, -33, 16, 22, 4, STEEL);
+    rrect(c, -3, -33, 6, 22, 1, s.color);
+    rrect(c, -7.5, -47, 15, 14, 5, STEEL);
+    rrect(c, 1, -42, 6.5, 2.2, 1, '#16181D');
+    c.strokeStyle = s.color; c.lineWidth = 3.5; c.lineCap = 'round';
+    c.beginPath(); c.moveTo(0, -47); c.quadraticCurveTo(-6, -55, -12, -48); c.stroke();
+    rrect(c, 9, -50, 10, 48, 3, STEEL_DARK);
+    c.strokeStyle = STEEL; c.lineWidth = 1.5; c.beginPath(); c.roundRect(9, -50, 10, 48, 3); c.stroke();
+    circle(c, 14, -26, 3.2, s.color);
+  }
+
+  if (type === 2) {                                   // Fighter: tunic, headband, sword
+    legs(c, walk, -13, 13, 3.5, '#3B3226');
+    rrect(c, -5.5, -30, 11, 18, 4, s.color);
+    rrect(c, -5.5, -17, 11, 3, 1, WOOD_DARK);
+    circle(c, 0, -36, 6.5, SKIN);
+    rrect(c, -6.5, -40.5, 13, 3, 1.5, s.dark);
+    line(c, -6, -39, -10, -36, 2, s.dark);
+    circle(c, 3.2, -36.5, 1.2, '#16181D');
+    const a = swing > 0 ? .7 - swing * 2.4 : -1.1;
+    const hx = 2 + Math.cos(a) * 9, hy = -26 + Math.sin(a) * 9;
+    line(c, 2, -26, hx, hy, 3, SKIN);
+    line(c, hx, hy, hx + Math.cos(a) * 20, hy + Math.sin(a) * 20, 2.6, '#DDE3EA');
+    line(c, hx - Math.sin(a) * 4, hy + Math.cos(a) * 4, hx + Math.sin(a) * 4, hy - Math.cos(a) * 4, 2.2, '#E2B84A');
+  }
+
+  if (type === 3) {                                   // Archer: hood, quiver, bow
+    legs(c, walk, -13, 13, 3.5, '#3B3226');
+    rrect(c, -11, -36, 4, 15, 1, WOOD_DARK);
+    for (const dx of [-10, -8.5]) line(c, dx, -36, dx, -40, 1.5, '#F4EFE6');
+    rrect(c, -5.5, -30, 11, 18, 4, s.dark);
+    rrect(c, -3, -30, 6, 18, 2, s.color);
+    circle(c, -1, -36, 7.5, s.color);
+    circle(c, 1.2, -35.5, 5.2, SKIN);
+    circle(c, 3.6, -36, 1.1, '#16181D');
+    const pull = swing > 0 ? 0 : 6;
+    const bx = 8, by = -25, br = 12;
+    c.strokeStyle = '#A0703C'; c.lineWidth = 2.5;
+    c.beginPath(); c.arc(bx, by, br, -1.15, 1.15); c.stroke();
+    const tx = bx + Math.cos(-1.15) * br, ty = by + Math.sin(-1.15) * br;
+    c.strokeStyle = '#E6E1D3'; c.lineWidth = .8;
+    c.beginPath(); c.moveTo(tx, ty); c.lineTo(bx + 5 - pull, by); c.lineTo(tx, by - (ty - by)); c.stroke();
+    if (pull) line(c, bx + 5 - pull, by, bx + 18, by, 1.4, '#D8CBB0');
+    line(c, 1, -26, bx + 5 - pull, by, 2.6, SKIN);
+  }
+
+  if (type === 4) {                                   // Brute: big muscles, horned helmet, spiked club
+    legs(c, walk, -14, 13, 6, s.dark);
+    c.fillStyle = SKIN_DARK;
+    c.beginPath(); c.moveTo(-11, -38); c.lineTo(11, -38); c.lineTo(7, -13); c.lineTo(-7, -13); c.closePath(); c.fill();
+    c.fillStyle = SKIN;
+    c.beginPath(); c.moveTo(-9, -37); c.lineTo(9, -37); c.lineTo(5.5, -15); c.lineTo(-5.5, -15); c.closePath(); c.fill();
+    line(c, -9, -36, 6, -16, 3.5, s.color);
+    rrect(c, -7, -17, 14, 5, 2, s.dark);
+    circle(c, 1, -43, 7, SKIN);
+    c.fillStyle = STEEL; c.beginPath(); c.arc(1, -44, 7.5, Math.PI, 0); c.fill();
+    c.strokeStyle = '#EDE6D6'; c.lineWidth = 2.4; c.lineCap = 'round';
+    c.beginPath(); c.moveTo(-6, -46); c.quadraticCurveTo(-12, -49, -11, -56); c.stroke();
+    c.beginPath(); c.moveTo(8, -46); c.quadraticCurveTo(14, -49, 13, -56); c.stroke();
+    line(c, 2.5, -45.5, 7, -44, 1.4, '#16181D');
+    circle(c, 4.5, -42.5, 1.2, '#16181D');
+    const a = swing > 0 ? .5 - swing * 3 : -2.2;
+    const hx = 6 + Math.cos(a) * 10, hy = -32 + Math.sin(a) * 10;
+    line(c, 6, -32, hx, hy, 5, SKIN_DARK);
+    const ex = hx + Math.cos(a) * 20, ey = hy + Math.sin(a) * 20;
+    line(c, hx, hy, ex, ey, 4.5, WOOD);
+    for (let i = 0; i < 6; i++) {
+      const sa = i * Math.PI / 3;
+      line(c, ex, ey, ex + Math.cos(sa) * 8, ey + Math.sin(sa) * 8, 1.6, STEEL);
+    }
+    circle(c, ex, ey, 6, WOOD_DARK);
+  }
+  c.restore();
+}
+
+function heightOf(type) { return [40, 56, 42, 42, 62][type] * [1.15, 1.3, 1, 1, 1.55][type]; }
+function topOf(e) {
+  if (e.kind === 'unit') return GROUND + e.depth - heightOf(e.type) - 10;
+  return e.kind === 'castle' ? GROUND - 215 : GROUND - 130;
+}
+
+function bar(x, y, w, frac, color) {
+  ctx.fillStyle = 'rgba(0,0,0,.6)';
+  ctx.fillRect(x - w / 2, y, w, 5);
+  ctx.fillStyle = color;
+  ctx.fillRect(x - w / 2, y, w * Math.max(0, frac), 5);
+}
+
+function stoneWall(x, y, w, h) {
+  rrect(ctx, x, y, w, h, 2, '#4A5060');
+  ctx.strokeStyle = '#3B404C'; ctx.lineWidth = 1;
+  for (let yy = y + 10, row = 0; yy < y + h; yy += 10, row++) {
+    ctx.beginPath(); ctx.moveTo(x, yy); ctx.lineTo(x + w, yy); ctx.stroke();
+    for (let xx = x + (row % 2 ? 6 : 12); xx < x + w; xx += 14) {
+      ctx.beginPath(); ctx.moveTo(xx, yy); ctx.lineTo(xx, yy + 10); ctx.stroke();
+    }
+  }
+}
+function battlements(x, y, w, color) {
+  ctx.fillStyle = color;
+  for (let xx = x; xx < x + w - 2; xx += 12) ctx.fillRect(xx, y - 7, 8, 7);
+  ctx.fillRect(x - 3, y, w + 6, 6);
+}
+function flag(x, y, color, dir) {
+  line(ctx, x, y, x, y - 30, 2, '#C9CED8');
+  const wave = Math.sin(clock * 4 + x) * 3;
+  ctx.fillStyle = color;
+  ctx.beginPath(); ctx.moveTo(x, y - 30); ctx.quadraticCurveTo(x + dir * 10, y - 26 + wave, x + dir * 20, y - 25);
+  ctx.lineTo(x, y - 18); ctx.closePath(); ctx.fill();
+}
+
+function shake(e) { return clock - e.hurt < .12 ? Math.sin(clock * 90) * 1.5 : 0; }
+
+function drawTower(t) {
+  const s = SIDES[t.team];
+  if (!t.alive) {
+    for (const [dx, dy, r] of [[-14, 0, 10], [6, -2, 12], [18, 2, 7], [-4, -12, 8]]) circle(ctx, t.x + dx, GROUND - 8 + dy, r, '#3A3F4B');
+    return;
+  }
+  const x = t.x + shake(t);
+  stoneWall(x - 22, GROUND - 110, 44, 105);
+  battlements(x - 22, GROUND - 110, 44, s.color);
+  rrect(ctx, x - 4, GROUND - 90, 8, 16, 4, '#16181D');
+  flag(x, GROUND - 117, s.color, dirOf(t.team));
+  bar(t.x, GROUND - 160, 50, t.hp / t.max, s.color);
+}
+
+function drawCastle(c) {
+  const s = SIDES[c.team], d = dirOf(c.team);
+  const x = c.x + shake(c);
+  stoneWall(x - 45, GROUND - 150, 90, 145);
+  stoneWall(x - 58, GROUND - 195, 30, 190);
+  stoneWall(x + 28, GROUND - 195, 30, 190);
+  battlements(x - 45, GROUND - 150, 90, s.color);
+  battlements(x - 58, GROUND - 195, 30, s.color);
+  battlements(x + 28, GROUND - 195, 30, s.color);
+  ctx.fillStyle = '#16181D';
+  ctx.beginPath(); ctx.roundRect(x - 16, GROUND - 52, 32, 47, [16, 16, 0, 0]); ctx.fill();
+  for (const wx of [-43, 43]) rrect(ctx, x + wx - 3, GROUND - 165, 6, 12, 3, '#E8C46A');
+  flag(x - 43, GROUND - 202, s.color, d);
+  flag(x + 43, GROUND - 202, s.color, d);
+  ctx.fillStyle = s.color;
+  ctx.font = 'bold 15px -apple-system, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText(s.name, c.x, GROUND - 250);
+  bar(c.x, GROUND - 243, 100, c.hp / c.max, s.color);
+  ctx.fillStyle = '#F4EFE6';
+  ctx.font = '12px -apple-system, sans-serif';
+  ctx.fillText(Math.ceil(c.hp), c.x, GROUND + 70);
+}
+
+function drawUnit(u) {
+  const since = clock - u.swing;
+  const swing = since < .3 ? 1 - since / .3 : 0;
+  const y = GROUND + u.depth;
+  drawSoldier(ctx, u.type, u.team, u.x + shake(u), y, dirOf(u.team), u.walk, swing);
+  bar(u.x, y - heightOf(u.type) - 6, 26, u.hp / u.max, SIDES[u.team].color);
+}
+
+function draw() {
+  if (!backdrop) buildBackdrop();
+  ctx.drawImage(backdrop, 0, 0, W, H);
+  castles.forEach(drawCastle);
+  towers.forEach(drawTower);
+  [...units].sort((a, b) => a.depth - b.depth).forEach(drawUnit);
+  for (const s of shots) {
+    const k = s.age / s.dur;
+    const x = s.x1 + (s.x2 - s.x1) * k;
+    if (s.kind === 'arrow') {                          // arrows fly in an arc
+      const arc = Math.sin(k * Math.PI) * 28;
+      const y = s.y1 + (s.y2 - s.y1) * k - arc;
+      const ang = Math.atan2((s.y2 - s.y1) - Math.cos(k * Math.PI) * Math.PI * 28, s.x2 - s.x1);
+      line(ctx, x - Math.cos(ang) * 10, y - Math.sin(ang) * 10, x, y, 1.6, '#D8CBB0');
+    } else {
+      const y = s.y1 + (s.y2 - s.y1) * k;
+      circle(ctx, x, y, 4, SIDES[s.team].color);
+      circle(ctx, x, y, 2, '#F4EFE6');
+    }
+  }
+  for (const p of puffs) {
+    const k = p.age / .5;
+    ctx.globalAlpha = 1 - k;
+    for (let i = 0; i < 6; i++) {
+      const a = i * Math.PI / 3;
+      circle(ctx, p.x + Math.cos(a) * p.size * k, p.y + Math.sin(a) * p.size * k * .6, 4 * (1 - k) + 2, '#C9CED8');
+    }
+  }
+  ctx.font = 'bold 12px -apple-system, sans-serif';
+  ctx.textAlign = 'center';
+  for (const p of pops) {
+    ctx.globalAlpha = 1 - p.age / .7;
+    ctx.fillStyle = '#FF7A6B';
+    ctx.fillText(p.text, p.x, p.y - p.age * 30);
+  }
+  ctx.globalAlpha = 1;
+  if (state === 'play') {
+    ctx.fillStyle = rush ? '#FFB02E' : '#A9ADB8';
+    ctx.font = 'bold 15px -apple-system, sans-serif';
+    ctx.textAlign = 'center';
+    const t = Math.floor(elapsed), mm = Math.floor(t / 60), ss = String(t % 60).padStart(2, '0');
+    ctx.fillText(rush ? `Rush time  ${mm}:${ss}` : `${mm}:${ss}`, W / 2, 26);
+  }
+}
+
+let last = 0;
+function frame(now) {
+  const dt = Math.min((now - last) / 1000 || 0, .05);
+  last = now;
+  update(dt);
+  draw();
+  updateDecks();
+  requestAnimationFrame(frame);
+}
+
+buildDecks();
+newGame(); state = 'menu';   // a field to show behind the menu
+bannerUntil = 0; $('banner').classList.remove('on');
+renderOverlay();
+fit();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
