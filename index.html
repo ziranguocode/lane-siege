@@ -36,7 +36,7 @@
     position: absolute; left: 50%; top: 12px; transform: translateX(-50%);
     background: rgba(22, 24, 29, .92); border: 2px solid var(--wall); border-radius: 10px;
     padding: 8px 16px; font-size: 18px; line-height: 1.3; font-weight: 600;
-    white-space: nowrap; opacity: 0; transition: opacity .25s; pointer-events: none;
+    width: max-content; max-width: 92%; text-align: center; opacity: 0; transition: opacity .25s; pointer-events: none;
   }
   #banner.on { opacity: 1; }
   #overlay {
@@ -103,15 +103,57 @@
   .pips { display: flex; gap: 3px; justify-content: center; margin-top: 2px; }
   .pips i { width: 12px; height: 6px; border-radius: 3px; background: #4A5060; }
   .pips i.on { background: var(--good); }
+
+  /* Layouts. fit() picks one from the screen shape every time the screen turns.
+     below: wide and tall enough, the decks sit side by side under the field.
+     sides: wide but short, like a phone on its side. Blue's deck is on the left, Orange's on the right.
+     portrait: tall, like a phone held upright. The decks stack under the field. */
+  #game { display: flex; flex-direction: column; align-items: center; gap: 10px; width: 100%; }
+  .deck.remote .cards { display: none; }
+  .deck-top { flex-wrap: wrap; }
+
+  body.lay-sides { padding-block: 6px; }
+  body.lay-sides #game { flex-direction: row; justify-content: center; gap: 8px; }
+  body.lay-sides #decks { display: contents; }
+  body.lay-sides .deck.p0 { order: 0; }
+  body.lay-sides #stage { order: 1; }
+  body.lay-sides .deck.p1 { order: 2; }
+  body.lay-sides .deck { width: 168px; padding: 6px; gap: 4px; align-self: center; }
+  body.lay-sides .deck-top { gap: 0 8px; font-size: 12px; }
+  body.lay-sides .deck-top .num { font-size: 13px; }
+  body.lay-sides .deck-top .rate { margin-left: 0; font-size: 12px; }
+  body.lay-sides .cards { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; }
+  body.lay-sides .card { padding: 3px 2px 4px; line-height: 1.1; }
+  body.lay-sides .card .k { font-size: 11px; padding: 0 4px; }
+  body.lay-sides .card canvas { width: 34px !important; height: 32px !important; }
+  body.lay-sides .card .c { font-size: 11px; }
+  body.lay-sides .card.up .c { display: none; }
+  body.lay-sides .pips i { width: 7px; height: 5px; }
+  .card { min-width: 0; overflow: hidden; overflow-wrap: anywhere; }
+  body.lay-sides .card.up .n { font-size: 10px; }
+  body.lay-portrait .card.up .n, body.lay-portrait .card.up .plus { font-size: 10px; }
+  body.lay-portrait .pips { gap: 2px; }
+  body.lay-portrait .pips i { width: 7px; height: 5px; }
+  body.lay-sides .card .n { display: none; }
+  body.lay-sides .card.up .n { display: block; font-size: 11px; }
+  body.lay-sides .card.up .plus { display: none; }
+
+  body.lay-portrait #decks { flex-direction: column; align-items: stretch; gap: 8px; width: 100%; max-width: 640px; }
+  body.lay-portrait .cards { grid-template-columns: repeat(5, minmax(0, 1fr)) minmax(0, 1.3fr); gap: 4px; }
+  body.lay-portrait .card { padding: 3px 2px 5px; }
+  body.lay-portrait .card canvas { width: 100% !important; max-width: 56px; height: auto !important; }
+  body.lay-portrait .card .n, body.lay-portrait .card .c, body.lay-portrait .card.up .plus { font-size: 11px; }
 </style>
 </head>
 <body>
-  <div id="stage">
-    <canvas id="c"></canvas>
-    <div id="banner"></div>
-    <div id="overlay"></div>
+  <div id="game">
+    <div id="stage">
+      <canvas id="c"></canvas>
+      <div id="banner"></div>
+      <div id="overlay"></div>
+    </div>
+    <div id="decks"></div>
   </div>
-  <div id="decks"></div>
 
 <script>
 // ---------- The numbers you can change ----------
@@ -716,10 +758,34 @@ function updateDecks() {
 const canvas = $('c'), ctx = canvas.getContext('2d');
 let scale = 1;
 let backdrop = null;
+let layout = '';
+function chooseLayout() {
+  if (innerHeight > innerWidth) return 'portrait';
+  return innerHeight < 600 ? 'sides' : 'below';
+}
+
 function fit() {
-  const decksH = $('decks').offsetHeight || 170;
-  scale = Math.min((innerWidth - 32) / W, (innerHeight - decksH - 40) / H);
-  scale = Math.max(scale, .4);
+  const lay = chooseLayout();
+  if (lay !== layout) {
+    if (layout) document.body.classList.remove('lay-' + layout);
+    document.body.classList.add('lay-' + lay);
+    layout = lay;
+  }
+  const css = getComputedStyle(document.body);
+  const padW = parseFloat(css.paddingLeft) + parseFloat(css.paddingRight);
+  const padH = parseFloat(css.paddingTop) + parseFloat(css.paddingBottom);
+  let roomW = innerWidth - padW, roomH = innerHeight - padH;
+  if (lay === 'sides') {
+    document.querySelectorAll('.deck').forEach(d => { roomW -= d.offsetWidth + 8; });
+  } else {
+    roomH -= $('decks').offsetHeight + 10;
+  }
+  scale = Math.max(.25, Math.min(roomW / W, roomH / H));
+  // A small field gets a smaller banner, so it does not cover the battle.
+  const banner = $('banner');
+  banner.style.fontSize = Math.round(Math.max(12, Math.min(18, 18 * scale))) + 'px';
+  banner.style.padding = scale < .7 ? '4px 10px' : '';
+  banner.style.top = scale < .7 ? '6px' : '';
   const dpr = devicePixelRatio || 1;
   canvas.style.width = W * scale + 'px';
   canvas.style.height = H * scale + 'px';
@@ -728,6 +794,9 @@ function fit() {
   ctx.setTransform(scale * dpr, 0, 0, scale * dpr, 0, 0);
 }
 addEventListener('resize', fit);
+// Phones report the new size a moment after they turn, so fit again then.
+addEventListener('orientationchange', () => { fit(); setTimeout(fit, 300); });
+if (window.visualViewport) visualViewport.addEventListener('resize', fit);
 
 function circle(c, x, y, r, fill) { c.fillStyle = fill; c.beginPath(); c.arc(x, y, r, 0, Math.PI * 2); c.fill(); }
 function rrect(c, x, y, w, h, r, fill) { c.fillStyle = fill; c.beginPath(); c.roundRect(x, y, w, h, r); c.fill(); }
