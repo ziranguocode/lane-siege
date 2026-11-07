@@ -2,7 +2,7 @@
 <html lang="en-AU">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>Lane Siege</title>
 <style>
   :root {
@@ -188,6 +188,19 @@ const CODE_LETTERS = 'ABCDEFGHJKLMNPQRSTUVWXYZ';   // no I or O, they look like 
 const SNAP_EVERY = 0.05;          // the host sends the battle 20 times a second
 const JOIN_WAIT = 12;             // seconds to wait when joining before giving up
 
+// The computer player. think: seconds between decisions. mistakes: chance of a random pick.
+// upgrades: how many upgrades it will build. forget: chance it skips building one.
+// wave: energy it saves before attacking. counters: whether it picks soldiers that beat yours.
+// react: how much stronger your army must be before it defends (bigger is later).
+// lowEnergy: Hard attacks early when your energy is below this.
+const BOT_LEVELS = {
+  easy:   { name: 'Easy',   think: 1.6, mistakes: .45, upgrades: 1, forget: .5, wave: 80,  react: 2.5, counters: false, lowEnergy: 0 },
+  normal: { name: 'Normal', think: 0.6, mistakes: .08, upgrades: 4, forget: 0,  wave: 170, react: 1.1, counters: true,  lowEnergy: 0 },
+  hard:   { name: 'Hard',   think: 0.3, mistakes: 0,   upgrades: 5, forget: 0,  wave: 240, react: 1.0, counters: true,  lowEnergy: 60 },
+};
+
+const PUNISH_WAVE = 90;           // energy for a quick attack on a player with no soldiers out
+
 const W = 1000, H = 400;
 const GROUND = 285;               // where the soldiers' feet are
 const SIDES = [
@@ -205,7 +218,8 @@ let units = [], towers = [], castles = [], shots = [], puffs = [], pops = [];
 let players = [];
 let clock = 0, elapsed = 0, rush = false, nextId = 1, bannerUntil = 0;
 let winner = null;
-// mode is 'local' (one device), 'host' (online, Blue) or 'guest' (online, Orange)
+// mode is 'local' (one device), 'bot' (against the computer), 'host' (online, Blue) or 'guest' (online, Orange)
+let botLevel = 'normal', bot = null;
 let mode = 'local', mySide = null, menuScreen = 'main', netStatus = 'idle', netMessage = '';
 let net = { peer: null, conn: null, code: null }, netTimer = 0, events = [], leaving = false;
 
@@ -217,6 +231,7 @@ function newGame() {
     kind: 'castle', team, x: s.castleX, hp: CASTLE.hp, max: CASTLE.hp, r: CASTLE.r, cd: 0, alive: true, hurt: -9 }));
   players = SIDES.map(() => ({ energy: START_ENERGY, built: 0, flash: [0, 0, 0, 0, 0, 0] }));
   elapsed = 0; rush = false; winner = null;
+  bot = mode === 'bot' ? newBrain(botLevel) : null;
   state = 'play';
   renderOverlay();
   showBanner('Go! Knock down the other castle.');
@@ -337,6 +352,7 @@ function update(dt) {
   elapsed += dt;
   if (!rush && elapsed >= RUSH_AFTER) { rush = true; showBanner('Rush time! Energy comes twice as fast.'); beep(990, .3); }
   players.forEach((p, team) => { p.energy = Math.min(MAX_ENERGY, p.energy + incomeOf(team) * (rush ? 2 : 1) * dt); });
+  if (mode === 'bot') botTick(dt);
   for (const u of units) if (u.alive) updateUnit(u, dt);
   towers.forEach(t => updateGuard(t, TOWER, dt));
   castles.forEach(c => updateGuard(c, CASTLE, dt));
@@ -361,14 +377,143 @@ function press(team, action) {
     players[1].flash[action] = clock + .15;
     return;
   }
-  if (mode === 'host' && team !== 0) return;
+  if ((mode === 'host' || mode === 'bot') && team !== 0) return;
   if (action === 5) upgrade(team); else send(team, action);
+}
+
+// ---------- The computer player ----------
+// The computer is Orange. It can only do what a person can: send(team, type) and upgrade(team),
+// with the same energy and the same costs. (The tests also let it play Blue.)
+const SHIELD = 0, TANK = 1, FIGHTER = 2, ARCHER = 3, BRUTE = 4;
+
+// How strong a group is: health times damage. Twice the soldiers is about four times as strong.
+function strength(list) {
+  let hp = 0, dps = 0;
+  for (const u of list) { hp += u.hp; dps += UNITS[u.type].dmg / UNITS[u.type].rate; }
+  return hp * dps;
+}
+
+// How far x is from this team's own castle side.
+function homeDist(team, x) { return team === 1 ? W - x : x; }
+
+// Look at the battle from the computer's side.
+function botLook(team) {
+  const h = u => homeDist(team, u.x);
+  const foes = units.filter(u => u.team !== team);
+  const mine = units.filter(u => u.team === team);
+  const front = foes.length ? Math.min(...foes.map(h)) : Infinity;          // the enemy closest to home
+  const coming = foes.filter(u => h(u) < W / 2 + 80);                       // enemies on our half
+  const defenders = mine.filter(u => h(u) <= front + 60);                   // our soldiers between them and home
+  let guard = strength(defenders);
+  const tower = towers[team];
+  if (tower.alive && front < homeDist(team, tower.x) + TOWER.range + 80) guard += tower.hp * (TOWER.dmg / TOWER.rate) * .5;
+  const bunch = coming.filter(u => h(u) - front < 60).length;               // enemies packed close together
+  const myFront = defenders.length ? defenders.reduce((a, b) => (h(a) > h(b) ? a : b)) : null;
+  return { coming, front, threat: strength(coming), guard, bunch, myFront };
+}
+
+function pickCounter(team, look, level) {
+  const me = players[team];
+  const has = t => me.energy >= UNITS[t].cost;
+  const count = t => look.coming.filter(u => u.type === t).length;
+  // Nobody in front of our soldiers to take the hits? Put a shield up first.
+  const shielded = look.myFront && (look.myFront.type === SHIELD || look.myFront.type === TANK);
+  if (!shielded) {
+    const big = look.coming.reduce((n, u) => n + u.hp, 0) > 700 || count(BRUTE) > 0;
+    if (big && has(TANK)) return TANK;
+    if (has(SHIELD)) return SHIELD;
+  }
+  if (level.counters) {
+    if (count(BRUTE) > 0) return has(ARCHER) ? ARCHER : null;                // Archers hit a Brute from out of its reach
+    if (look.bunch >= 3 && has(BRUTE)) return BRUTE;                          // a Brute hits a whole group
+    if (count(TANK) > 0 && has(FIGHTER)) return FIGHTER;                      // lots of quick hits for a Tank
+    if (count(ARCHER) >= 2 && has(FIGHTER)) return FIGHTER;                   // fast Fighters reach archers
+  }
+  if (has(ARCHER) && shielded) return ARCHER;
+  if (has(FIGHTER)) return FIGHTER;
+  return has(SHIELD) ? SHIELD : null;
+}
+
+// Plan an attack with the energy saved: shields or a tank first, then damage behind them.
+// wait is how many seconds after the first soldier each one is sent, so the front stays in front.
+function planWave(team, budget, level) {
+  const plan = [];
+  const add = (type, wait) => {
+    if (budget < UNITS[type].cost) return false;
+    plan.push({ type, wait }); budget -= UNITS[type].cost; return true;
+  };
+  if (budget >= 200 && level !== BOT_LEVELS.easy) add(TANK, 0);
+  else { add(SHIELD, 0); if (budget >= 100) add(SHIELD, .6); }
+  if (level !== BOT_LEVELS.easy && budget >= 120 && units.some(u => u.team !== team)) add(BRUTE, 1.5);
+  let wait = 2.5;
+  for (let n = 0; budget >= 30 && n < 8; n++) {
+    const type = level === BOT_LEVELS.hard ? (n % 3 === 2 ? FIGHTER : ARCHER) : (n % 2 ? ARCHER : FIGHTER);
+    if (!add(type, type === FIGHTER ? wait + 1.5 : wait) && !add(FIGHTER, wait + 1.5)) break;
+    wait += .5;
+  }
+  return plan;
+}
+
+function newBrain(levelKey) { return { level: BOT_LEVELS[levelKey], timer: 1, queue: [], skipUntil: 0 }; }
+
+function botTick(dt, team = 1, brain = bot) {
+  const me = players[team];
+  // Send the next soldier of a planned wave when its time comes.
+  const head = brain.queue[0];
+  if (head && elapsed >= head.at && me.energy >= UNITS[head.type].cost) {
+    brain.queue.shift();
+    send(team, head.type);
+  }
+  brain.timer -= dt;
+  if (brain.timer > 0) return;
+  brain.timer = brain.level.think * (.8 + Math.random() * .4);
+  botThink(team, brain);
+}
+
+function botThink(team, brain) {
+  const level = brain.level, me = players[team], look = botLook(team);
+  const random = () => Math.random() < level.mistakes;
+  // 1. Defend when the enemy on our half is stronger than what is there to stop them.
+  if (look.coming.length && look.threat > look.guard * level.react) {
+    brain.queue = [];                                 // forget the attack, home comes first
+    const type = random() ? Math.floor(Math.random() * 5) : pickCounter(team, look, level);
+    if (type !== null && me.energy >= UNITS[type].cost) send(team, type);
+    return;
+  }
+  if (brain.queue.length) return;                     // still sending a wave
+  // 2. Build the next upgrade when it is safe.
+  const next = UPGRADES[me.built], foe = players[1 - team];
+  const wantsUpgrade = next && me.built < level.upgrades && elapsed >= brain.skipUntil;
+  const foeArmy = units.some(u => u.team !== team);
+  // Normal and Hard punish a player who only builds upgrades: attack while they have no soldiers out.
+  if (level.counters && !foeArmy && foe.built > me.built && me.energy >= PUNISH_WAVE) {
+    brain.queue = planWave(team, me.energy, level).map(p => ({ type: p.type, at: elapsed + p.wait }));
+    return;
+  }
+  if (wantsUpgrade) {
+    if (me.energy >= next.cost) {
+      if (Math.random() >= level.forget) upgrade(team);
+      else brain.skipUntil = elapsed + 8;            // Easy sometimes forgets for a while
+      return;
+    }
+    if (me.built < 3) return;                         // save up for the cheap early upgrades
+    if (level.counters && foe.built > me.built) return; // never fall behind on upgrades
+  }
+  // 3. Attack in waves.
+  // Hard attacks early when you are low on energy or have no soldiers out.
+  const foeLow = level.lowEnergy && (foe.energy < level.lowEnergy || !foeArmy);
+  const want = rush ? level.wave * .7 : level.wave;
+  const ready = me.energy >= want || me.energy >= MAX_ENERGY * .9 || (foeLow && me.energy >= want * .6);
+  if (!ready) return;
+  const keep = wantsUpgrade ? Math.min(me.energy * .3, next.cost) : 0;
+  const plan = random() ? [{ type: Math.floor(Math.random() * 5), wait: 0 }] : planWave(team, me.energy - keep, level);
+  brain.queue = plan.map(p => ({ type: p.type, at: elapsed + p.wait }));
 }
 
 function canStart() {
   if (mode === 'guest') return false;
   if (mode === 'host') return netStatus === 'ready';
-  return state === 'over' || menuScreen === 'main';
+  return state === 'over' || menuScreen === 'main' || menuScreen === 'bot';
 }
 
 addEventListener('keydown', e => {
@@ -378,7 +523,7 @@ addEventListener('keydown', e => {
   if (e.code === 'Space') e.preventDefault();
   if (e.repeat) return;
   if (e.code === 'KeyM') { ACTIONS.sound(); return; }
-  if ((e.code === 'Space' || e.code === 'Enter') && state !== 'play') { if (canStart()) newGame(); return; }
+  if ((e.code === 'Space' || e.code === 'Enter') && state !== 'play') { if (canStart()) ACTIONS.start(); return; }
   if (e.code === 'Escape') { ACTIONS.menu(); return; }
   if (state !== 'play') return;
   SIDES.forEach((s, team) => {
@@ -391,6 +536,24 @@ addEventListener('keydown', e => {
 
 // Stop the page sliding about while people tap fast.
 document.addEventListener('touchmove', e => { if (state === 'play') e.preventDefault(); }, { passive: false });
+
+// No zooming, anywhere in the game. iPads and iPhones ignore the page setting, so block it here.
+// Two fingers pinching, and Safari's own pinch events:
+document.addEventListener('touchmove', e => { if (e.touches.length > 1) e.preventDefault(); }, { passive: false });
+document.addEventListener('touchstart', e => { if (e.touches.length > 1) e.preventDefault(); }, { passive: false });
+for (const g of ['gesturestart', 'gesturechange', 'gestureend']) document.addEventListener(g, e => e.preventDefault(), { passive: false });
+// A quick double tap:
+let lastTouchEnd = 0;
+document.addEventListener('touchend', e => {
+  const now = Date.now();
+  if (now - lastTouchEnd < 350 && !e.target.closest('input')) e.preventDefault();
+  lastTouchEnd = now;
+}, { passive: false });
+// Trackpad pinch and Ctrl or Cmd with the mouse wheel or + and - on a computer:
+addEventListener('wheel', e => { if (e.ctrlKey || e.metaKey) e.preventDefault(); }, { passive: false });
+addEventListener('keydown', e => {
+  if ((e.ctrlKey || e.metaKey) && ['Equal', 'Minus', 'NumpadAdd', 'NumpadSubtract', 'Digit0', 'Numpad0'].includes(e.code)) e.preventDefault();
+});
 
 // ---------- Sound ----------
 let audio = null, muted = false;
@@ -439,12 +602,13 @@ function shareLink() { return location.href.split('#')[0] + '#' + net.code; }
 function overlayHtml() {
   const blue = `<span style="color:${SIDES[0].color};font-weight:700">Blue</span>`;
   const orange = `<span style="color:${SIDES[1].color};font-weight:700">Orange</span>`;
-  const leave = `<button data-act="menu">${mode === 'local' ? 'Menu' : 'Leave'}</button>`;
+  const leave = `<button data-act="menu">${mode === 'local' || mode === 'bot' ? 'Menu' : 'Leave'}</button>`;
   if (state === 'over') {
     const s = SIDES[winner];
     const youWon = mode !== 'local' ? (winner === mySide ? 'You win!' : 'You lose.') : '';
+    const vsBot = mode === 'bot' ? ` <span class="hint">Computer: ${BOT_LEVELS[botLevel].name}</span>` : '';
     return `<h2 style="color:${s.color}">${s.name} wins!</h2>
-      <p>${SIDES[1 - winner].name}'s castle is down. ${youWon}</p>
+      <p>${SIDES[1 - winner].name}'s castle is down. ${youWon}${vsBot}</p>
       ${mode === 'guest'
         ? `<p>Waiting for the host to start a rematch.</p><div class="row">${leave}</div>`
         : `<div class="row"><button class="main" data-act="start">Rematch</button>${leave}</div>
@@ -471,6 +635,11 @@ function overlayHtml() {
     <div class="row"><input id="code" maxlength="4" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="CODE" aria-label="Game code">
       <button data-act="join">Join a game</button></div>
     <div class="row"><button data-act="back">Back</button></div>`;
+  if (menuScreen === 'bot') return `<h2>Play against the computer</h2>
+    <p>You are ${blue}. The computer is ${orange}. Use either set of keys, or tap your cards.</p>
+    <div class="row">${Object.keys(BOT_LEVELS).map(k => `<button data-act="level" data-level="${k}" class="${k === botLevel ? 'main' : ''}">${BOT_LEVELS[k].name}</button>`).join('')}</div>
+    <p class="hint">Easy is slow and makes mistakes. Normal plays well. Hard builds fast, picks soldiers that beat yours, and attacks when you run low.</p>
+    <div class="row"><button class="main" data-act="start">Start</button><button data-act="back">Back</button></div>`;
   if (menuScreen === 'message') return `<h2>${netMessage}</h2><div class="row"><button class="main" data-act="back">OK</button></div>`;
   return `<h1>Lane Siege</h1>
     <p>Send soldiers down the road and knock down the other castle.
@@ -479,13 +648,26 @@ function overlayHtml() {
        On an iPad, tap the cards under the battle.</p>
     <p>Energy fills up to 1000. Spend it on soldiers now, or build upgrades that make more energy every second.
        There are five upgrades, each bigger than the last. After 2 minutes it is Rush time and energy comes twice as fast.</p>
-    <div class="row"><button class="main" data-act="start">Play here</button><button data-act="online">Play online</button>
+    <div class="row"><button class="main" data-act="start">Play here</button><button data-act="vsbot">Play against the computer</button><button data-act="online">Play online</button>
       <button data-act="sound">Sound ${muted ? 'off' : 'on'}</button></div>
     <p class="hint">Play here is two players on one keyboard or one iPad. Space also starts. If the keys do nothing, click the game first.</p>`;
 }
 
+function startBot() {
+  if (mode !== 'local' && mode !== 'bot') leaveNet();
+  mode = 'bot'; mySide = 0;
+  renderDecks();
+  newGame();
+}
+
 const ACTIONS = {
-  start() { if (canStart()) newGame(); },
+  start() {
+    if (!canStart()) return;
+    if (state === 'menu' && menuScreen === 'bot') startBot();
+    else newGame();
+  },
+  vsbot() { menuScreen = 'bot'; renderOverlay(); },
+  level(b) { if (b && BOT_LEVELS[b.dataset.level]) botLevel = b.dataset.level; renderOverlay(); },
   online() { menuScreen = 'online'; renderOverlay(); },
   back() { menuScreen = 'main'; renderOverlay(); },
   host() { hostGame(); },
@@ -503,6 +685,7 @@ const ACTIONS = {
   },
   sound() { muted = !muted; if (state === 'menu' && mode === 'local' && menuScreen === 'main') renderOverlay(); },
   menu() {
+    if (mode === 'bot') { mode = 'local'; mySide = null; bot = null; renderDecks(); }
     if (mode !== 'local') leaveNet();
     state = 'menu'; menuScreen = 'main'; units = [];
     renderOverlay();
@@ -516,7 +699,7 @@ function selectLink() {
 }
 $('overlay').addEventListener('click', e => {
   const b = e.target.closest('[data-act]');
-  if (b) { wakeSound(); ACTIONS[b.dataset.act](); }
+  if (b) { wakeSound(); ACTIONS[b.dataset.act](b); }
 });
 
 // ---------- Online ----------
@@ -720,7 +903,7 @@ function buildDecks() {
   });
 }
 
-// Online, your own deck says You and the other one is dimmed.
+// Online or against the computer, your own deck says You and the other one is dimmed.
 function renderDecks() {
   SIDES.forEach((s, team) => {
     const d = deckEls[team];
@@ -728,7 +911,7 @@ function renderDecks() {
     const online = mode !== 'local';
     d.deck.classList.toggle('remote', online && team !== mySide);
     d.tag.hidden = !online;
-    d.tag.textContent = team === mySide ? 'You' : 'Online player';
+    d.tag.textContent = team === mySide ? 'You' : mode === 'bot' ? 'Computer' : 'Online player';
   });
   fit();
 }
